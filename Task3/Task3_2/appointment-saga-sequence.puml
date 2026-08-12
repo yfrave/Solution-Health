@@ -1,0 +1,82 @@
+@startuml appointment-saga-sequence
+
+autonumber
+skinparam shadowing false
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
+
+actor "Пациент" as Patient
+boundary "Мобильное\nприложение" as Mobile
+boundary "API Gateway" as Gateway
+control "Patient API" as Api
+control "Saga Orchestrator" as Saga
+participant "DMS Adapter\n+ 1С" as Dms
+participant "Расписание" as Schedule
+participant "Lab Adapter\n+ LIS" as Lab
+participant "Payment Adapter\n+ платёжный шлюз" as Payment
+participant "Outbox Publisher" as Outbox
+queue "Kafka" as Kafka
+participant "Уведомления" as Notifications
+
+Patient -> Mobile : Выбирает врача, слот, исследование\nи способ оплаты
+Mobile -> Gateway : POST /api/v1/booking-processes\nAuthorization: Bearer JWT\nIdempotency-Key: UUID
+Gateway -> Api : Проверенный запрос + patientId
+Api -> Saga : createSaga(patientId, requestHash, idempotencyKey)
+activate Saga
+Saga -> Saga : В одной транзакции:\nINSERT idempotency request\nINSERT Saga STARTED
+Saga --> Api : operationId, STARTED
+Api --> Gateway : 202 Accepted
+Gateway --> Mobile : 202 {operationId, status: STARTED}
+
+... Оркестратор продолжает процесс без удержания мобильного соединения ...
+
+Saga -> Dms : checkPolicy(patientId, serviceIds, operationId)
+Dms --> Saga : valid=true, coveredAmount
+
+Saga -> Schedule : reserveDoctorSlot(slotId, patientId, operationId)
+Schedule --> Saga : doctorReservationId, expiresAt
+
+opt Для консультации требуется сдача анализов
+    Saga -> Lab : reserveLabSlot(labSlotId, patientId, operationId)
+    Lab --> Saga : labReservationId, expiresAt
+end
+
+Saga -> Payment : charge(operationId, amount)
+Payment --> Saga : paymentId, SUCCEEDED
+
+Saga -> Schedule : confirmDoctorReservation(doctorReservationId, operationId)
+Schedule --> Saga : appointmentId, CONFIRMED
+
+opt Лабораторный слот был зарезервирован
+    Saga -> Lab : confirmLabReservation(labReservationId, operationId)
+    Lab --> Saga : labAppointmentId, CONFIRMED
+end
+
+Saga -> Saga : В одной транзакции:\nSaga = COMPLETED\nсохранить результат идемпотентности\nдобавить outbox event
+Saga ->> Outbox : Зафиксирована новая outbox-запись
+deactivate Saga
+
+Outbox ->> Kafka : BookingProcessCompleted.v1\noperationId + appointmentId
+
+Kafka ->> Notifications : BookingProcessCompleted.v1
+Notifications ->> Patient : Push: запись подтверждена
+
+Mobile -> Gateway : GET /api/v1/booking-processes/{operationId}
+Gateway -> Api : Запрос статуса
+Api -> Saga : getStatus(operationId, patientId)
+Saga --> Api : COMPLETED + appointment details
+Api --> Mobile : 200 OK
+
+note over Api, Saga
+Повторный POST с тем же Idempotency-Key и тем же телом
+возвращает существующий operationId.
+Тот же ключ с другим телом возвращает 409 Conflict.
+end note
+
+note over Saga, Payment
+Каждая команда содержит один operationId.
+Участники сохраняют результат первой обработки
+и безопасно отвечают на повторные команды.
+end note
+
+@enduml

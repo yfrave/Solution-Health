@@ -1,0 +1,277 @@
+openapi: 3.2.0
+info:
+  title: Health+ Patient Appointments API
+  version: 1.0.0
+  description: API мобильного приложения для получения записей текущего пациента.
+
+servers:
+  - url: https://api.healthplus.example.com
+    description: Production API Gateway
+
+tags:
+  - name: Appointments
+    description: Записи пациента к врачу
+
+security:
+  - bearerAuth: []
+
+paths:
+  /api/v1/appointments:
+    get:
+      tags:
+        - Appointments
+      summary: Получить список предстоящих записей текущего пациента
+      description: >-
+        Возвращает только записи пациента, идентификатор которого получен из JWT.
+        Результат отсортирован по startsAt по возрастанию, затем по id по возрастанию.
+      operationId: listPatientAppointments
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: >-
+            Фильтр по состоянию. upcoming означает все будущие активные записи;
+            scheduled и confirmed выбирают конкретное состояние.
+          schema:
+            type: string
+            enum:
+              - upcoming
+              - scheduled
+              - confirmed
+              - cancelled
+            default: upcoming
+          example: upcoming
+        - name: limit
+          in: query
+          required: false
+          description: Максимальное количество записей в ответе.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+          example: 20
+        - name: offset
+          in: query
+          required: false
+          description: Количество записей, которые нужно пропустить от начала выборки.
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+          example: 0
+      responses:
+        '200':
+          description: Список записей успешно получен.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppointmentListResponse'
+              examples:
+                upcomingAppointments:
+                  summary: Две предстоящие записи
+                  value:
+                    items:
+                      - id: 3fba1bb7-e743-4b47-8b0e-7ef12976f94d
+                        status: confirmed
+                        startsAt: '2026-08-18T09:00:00+03:00'
+                        endsAt: '2026-08-18T09:30:00+03:00'
+                        doctor:
+                          id: 8a5f7b47-5fce-45a2-a312-4d6c411872cf
+                          fullName: Анна Сергеевна Петрова
+                          specialty: Терапевт
+                        clinic:
+                          id: 07b9b37a-297e-41a6-b62b-57ba099159b6
+                          name: Здоровье+ на Тверской
+                          city: Москва
+                          address: ул. Тверская, д. 10
+                      - id: d17dfd1a-7ec1-4cc7-9e22-4b9d969bc976
+                        status: scheduled
+                        startsAt: '2026-08-25T14:00:00+03:00'
+                        endsAt: '2026-08-25T14:45:00+03:00'
+                        doctor:
+                          id: 0c441604-b675-4f3c-9c8d-f2d37d1df880
+                          fullName: Илья Андреевич Соколов
+                          specialty: Кардиолог
+                        clinic:
+                          id: 07b9b37a-297e-41a6-b62b-57ba099159b6
+                          name: Здоровье+ на Тверской
+                          city: Москва
+                          address: ул. Тверская, д. 10
+                    pagination:
+                      limit: 20
+                      offset: 0
+                      total: 2
+                      hasMore: false
+        '401':
+          description: Access token отсутствует, истёк или не прошёл проверку.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                unauthorized:
+                  summary: Токен истёк
+                  value:
+                    code: UNAUTHORIZED
+                    message: Access token is missing, expired or invalid
+                    traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+                    timestamp: '2026-08-11T12:15:30Z'
+        '500':
+          description: Внутренняя ошибка при получении записей.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                internalError:
+                  summary: Внутренняя ошибка
+                  value:
+                    code: INTERNAL_ERROR
+                    message: Unable to retrieve appointments
+                    traceId: 00f067aa0ba902b7a3ce929d0e0e4736
+                    timestamp: '2026-08-11T12:16:10Z'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: 'OIDC access token, переданный в заголовке Authorization: Bearer {token}.'
+
+  schemas:
+    AppointmentListResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - items
+        - pagination
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Appointment'
+        pagination:
+          $ref: '#/components/schemas/OffsetPagination'
+
+    Appointment:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - status
+        - startsAt
+        - endsAt
+        - doctor
+        - clinic
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Идентификатор записи.
+        status:
+          type: string
+          enum:
+            - scheduled
+            - confirmed
+            - cancelled
+        startsAt:
+          type: string
+          format: date-time
+        endsAt:
+          type: string
+          format: date-time
+        doctor:
+          $ref: '#/components/schemas/DoctorSummary'
+        clinic:
+          $ref: '#/components/schemas/ClinicSummary'
+
+    DoctorSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - fullName
+        - specialty
+      properties:
+        id:
+          type: string
+          format: uuid
+        fullName:
+          type: string
+          minLength: 1
+        specialty:
+          type: string
+          minLength: 1
+
+    ClinicSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - name
+        - city
+        - address
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+        city:
+          type: string
+          enum:
+            - Москва
+            - Санкт-Петербург
+            - Екатеринбург
+            - Новосибирск
+        address:
+          type: string
+          minLength: 1
+
+    OffsetPagination:
+      type: object
+      additionalProperties: false
+      required:
+        - limit
+        - offset
+        - total
+        - hasMore
+      properties:
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+        offset:
+          type: integer
+          minimum: 0
+        total:
+          type: integer
+          minimum: 0
+        hasMore:
+          type: boolean
+
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - code
+        - message
+        - traceId
+        - timestamp
+      properties:
+        code:
+          type: string
+          example: INTERNAL_ERROR
+        message:
+          type: string
+          example: Unable to retrieve appointments
+        traceId:
+          type: string
+          description: Идентификатор для сквозной диагностики запроса.
+          example: 4bf92f3577b34da6a3ce929d0e0e4736
+        timestamp:
+          type: string
+          format: date-time

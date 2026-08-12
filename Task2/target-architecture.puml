@@ -1,0 +1,124 @@
+@startuml HealthPlus_Target_Context
+
+!include <C4/C4_Context>
+!pragma layout smetana
+
+LAYOUT_LEFT_RIGHT()
+
+AddElementTag("New", $bgColor="#2E7D32", $fontColor="#FFFFFF", $legendText="Новая система")
+
+Person(patient, "Пациент", "Записывается к врачу, оплачивает услуги, управляет ДМС и получает результаты")
+Person(doctor, "Врач", "Управляет расписанием и просматривает данные пациентов")
+Person(labTechnician, "Лаборант", "Контролирует результаты исследований в LIS")
+
+Enterprise_Boundary(healthPlus, "Здоровье+") {
+
+    System(mobileApp, "Мобильное приложение", "Новый клиентский канал для пациентов", $tags="New")
+    System(webPortal, "Веб-портал", "Существующий интерфейс пациентов, врачей и администраторов")
+
+    System(apiGateway, "API Gateway", "Единая внешняя точка входа: TLS, проверка токенов, rate limiting, WAF, маршрутизация", $tags="New")
+    System(identityProvider, "Identity Provider", "OIDC/OAuth 2.0, MFA, JWT и управление пользовательскими сессиями", $tags="New")
+    System(patientApi, "Patient API / Mobile Backend", "Stateless BFF для мобильных и пациентских сценариев", $tags="New")
+
+    System(bookingOrchestrator, "Оркестратор записи и оплаты", "Saga, журнал процесса, компенсации, идемпотентность и проверка статуса", $tags="New")
+    System(integrationPlatform, "Интеграционные сервисы / ACL", "Независимые stateless-адаптеры LIS, 1С и платежей; нормализация контрактов, кэш и reconciliation", $tags="New")
+    System(eventPlatform, "Событийная платформа", "Kafka: долговременные доменные события, replay, DLQ и независимые потребители", $tags="New")
+    System(resultsService, "Сервис результатов анализов", "Защищённая read-модель результатов для мобильного приложения", $tags="New")
+    System(observability, "Платформа наблюдаемости", "Централизованные логи, метрики, distributed tracing и алерты", $tags="New")
+
+    System(schedule, "Расписание", "Слоты врачей, создание, подтверждение и отмена записей; Java, REST, PostgreSQL")
+    System(crm, "CRM", "Карточки пациентов, контакты, история обращений и результаты анализов; Java, REST, PostgreSQL")
+    System(lis, "LIS", "Лабораторные результаты и загрузка данных с оборудования; SOAP, FTP, REST")
+    System(policies1c, "1С: Полисы", "Валидация и прикрепление полисов ДМС; HTTP-шлюз")
+    System(notificationService, "Уведомления", "Email, SMS и push; RabbitMQ и внешние провайдеры")
+}
+
+System_Ext(paymentGateway, "Платёжный шлюз", "Внешний поставщик онлайн-платежей; REST API")
+
+Rel(patient, mobileApp, "Пользуется", "Mobile UI")
+Rel(patient, webPortal, "Пользуется", "HTTPS")
+Rel(doctor, webPortal, "Управляет расписанием и смотрит данные", "HTTPS")
+Rel(labTechnician, lis, "Контролирует результаты", "UI / API")
+
+Rel(mobileApp, identityProvider, "Выполняет вход и обновляет токен", "OIDC Authorization Code + PKCE / HTTPS")
+Rel(mobileApp, apiGateway, "Вызывает API пациента", "HTTPS / REST JSON / JWT")
+Rel(webPortal, apiGateway, "Вызывает пациентские API", "HTTPS / REST JSON / JWT")
+Rel(apiGateway, identityProvider, "Проверяет подпись JWT и scopes", "OIDC / JWKS с локальным кэшем ключей")
+Rel(apiGateway, patientApi, "Маршрутизирует аутентифицированные запросы", "REST / JSON")
+
+Rel(patientApi, crm, "Читает и обновляет профиль пациента", "REST / JSON; timeout + circuit breaker")
+Rel(patientApi, resultsService, "Получает результаты анализов", "REST / JSON; cursor pagination")
+Rel(patientApi, integrationPlatform, "Проверяет и прикрепляет полис ДМС", "REST / JSON; cache fallback")
+Rel(patientApi, bookingOrchestrator, "Запускает процесс записи и получает его статус", "REST / JSON; Idempotency-Key; 202 + operationId")
+
+Rel(bookingOrchestrator, schedule, "Резервирует, подтверждает или отменяет слот", "REST / JSON; timeout + retry + circuit breaker + Idempotency-Key")
+Rel(bookingOrchestrator, integrationPlatform, "Проводит, проверяет или возвращает оплату", "REST / JSON; operationId; timeout + retry + circuit breaker")
+Rel(integrationPlatform, paymentGateway, "Вызывает платёжные операции и status API", "HTTPS / REST JSON; idempotency key")
+
+Rel(integrationPlatform, policies1c, "Проверяет и прикрепляет полис; обновляет кэш", "HTTP; timeout + circuit breaker; controlled retry")
+
+Rel(lis, integrationPlatform, "Передаёт результаты анализов", "REST / JSON с eventId; batch reconciliation при пропусках")
+Rel(integrationPlatform, crm, "Идемпотентно обновляет результаты", "REST / JSON; Idempotency-Key")
+Rel(integrationPlatform, eventPlatform, "Публикует LabResultPublished", "Kafka; transactional outbox; at-least-once")
+
+Rel(schedule, eventPlatform, "Публикует события записей", "Kafka; transactional outbox; at-least-once")
+Rel(bookingOrchestrator, eventPlatform, "Публикует BookingConfirmed, PaymentSucceeded и ошибки процесса", "Kafka; transactional outbox")
+Rel(eventPlatform, resultsService, "Доставляет LabResultPublished", "Kafka consumer; inbox/deduplication по eventId")
+Rel(resultsService, eventPlatform, "Публикует LabResultAvailable после обновления read-модели", "Kafka; transactional outbox")
+Rel(eventPlatform, notificationService, "Доставляет события записи, оплаты и готовности анализов", "Kafka consumer; at-least-once")
+Rel(notificationService, patient, "Отправляет push, SMS и email", "Асинхронно через внешних провайдеров")
+
+Rel(webPortal, schedule, "Управляет слотами и записями врачей", "HTTPS / REST JSON")
+Rel(webPortal, crm, "Показывает карточки и результаты врачам", "HTTPS / REST JSON")
+
+Rel(eventPlatform, observability, "Передаёт lag, throughput и ошибки доставки", "Metrics / logs")
+
+note right of patientApi
+Синхронно выполняются только запросы,
+для которых пользователю нужен быстрый ответ.
+
+Patient API не хранит сессии локально
+и масштабируется горизонтально.
+end note
+
+note bottom of bookingOrchestrator
+Клиент не удерживает соединение на время
+всего распределённого процесса.
+
+POST создаёт Saga и возвращает operationId.
+Статус доступен через API и уведомления.
+end note
+
+note bottom of integrationPlatform
+ACL изолирует мобильный контур от SOAP,
+FTP, нестабильных форматов 1С и API
+внешнего платёжного провайдера.
+
+Бизнес-оркестрация здесь не размещается.
+end note
+
+note bottom of eventPlatform
+Асинхронный стиль используется для фактов,
+которые не должны задерживать ответ клиенту.
+
+At-least-once дополняется outbox/inbox
+и идемпотентными потребителями.
+end note
+
+note bottom of lis
+Batch не является основным каналом.
+Он используется только для reconciliation
+и восстановления пропущенных результатов.
+end note
+
+note right of observability
+Все компоненты передают структурированные логи,
+метрики и trace spans с единым traceId.
+
+На диаграмме оставлена одна связь с Kafka,
+чтобы не перегружать C4 множеством линий телеметрии.
+end note
+
+SHOW_LEGEND()
+
+@enduml
