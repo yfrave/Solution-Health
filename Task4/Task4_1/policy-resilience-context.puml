@@ -1,0 +1,58 @@
+@startuml policy-resilience-context
+
+!include <C4/C4_Context>
+!pragma layout smetana
+
+LAYOUT_LEFT_RIGHT()
+
+AddElementTag("New", $bgColor="#2E7D32", $fontColor="#FFFFFF", $legendText="Новая система")
+
+Person(patient, "Пациент", "Проверяет и прикрепляет полис ДМС в мобильном приложении")
+
+Enterprise_Boundary(healthPlus, "Здоровье+") {
+    System(mobileApp, "Мобильное приложение", "Клиентский канал пациента", $tags="New")
+    System(apiGateway, "API Gateway", "Аутентификация, rate limiting и маршрутизация", $tags="New")
+    System(patientApi, "Patient API", "Stateless API мобильных сценариев", $tags="New")
+
+    System(policyService, "DMS Policy Service", "Policy Facade / ACL: read-модель, Redis-кэш, single-flight, Circuit Breaker, bulkhead и reconciliation", $tags="New")
+    SystemQueue(policyCommands, "Очередь команд полисов", "Устойчивая очередь для идемпотентного прикрепления и фоновой сверки", $tags="New")
+
+    System(policies1c, "1С: Полисы", "Источник истины: проверка валидности и прикрепление полиса; HTTP-шлюз")
+    System(observability, "Платформа наблюдаемости", "Метрики, логи, tracing и алерты", $tags="New")
+}
+
+Rel(patient, mobileApp, "Проверяет или прикрепляет полис", "Mobile UI")
+Rel(mobileApp, apiGateway, "Вызывает API полисов", "HTTPS / REST JSON / JWT")
+Rel(apiGateway, patientApi, "Передаёт проверенный запрос", "REST / JSON")
+Rel(patientApi, policyService, "Проверяет полис или создаёт команду прикрепления", "REST / JSON; 200 из read-модели или 202 PENDING")
+
+Rel(policyService, policies1c, "Сверяет кэш и выполняет защищённые команды", "HTTP; timeout 2 с; CB; max 40 RPS; bulkhead")
+Rel(policyService, policyCommands, "Публикует attach/verify/reconcile", "AMQP; operationId; at-least-once")
+Rel(policyCommands, policyService, "Доставляет команды worker-экземплярам", "AMQP consumer; deduplication")
+Rel(policyService, observability, "Передаёт состояние CB, latency, cache hit rate и backlog", "Metrics / logs / traces")
+
+note bottom of policyService
+Свежие проверки обслуживаются из Redis.
+Параллельные промахи одного пациента
+объединяются механизмом single-flight.
+
+Устаревшие данные возвращаются только
+как PENDING с меткой свежести,
+а не как ложный valid/invalid.
+end note
+
+note bottom of policyCommands
+Пиковая нагрузка буферизуется очередью.
+Команды дедуплицируются по operationId,
+а полная сверка запускается пакетно.
+end note
+
+note right of policies1c
+Мобильный контур не обращается
+в 1С напрямую. Исходящий поток
+ограничен ниже известного порога 50 RPS.
+end note
+
+SHOW_LEGEND()
+
+@enduml

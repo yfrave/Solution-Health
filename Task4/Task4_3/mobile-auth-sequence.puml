@@ -1,0 +1,52 @@
+@startuml mobile-auth-sequence
+
+autonumber
+skinparam shadowing false
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
+
+actor "Пациент" as Patient
+boundary "Мобильное\nприложение" as Mobile
+boundary "Системный\nбраузер" as Browser
+control "Identity Provider\nOIDC" as IdP
+boundary "API Gateway" as Gateway
+control "Patient API" as Api
+
+Patient -> Mobile : Нажимает «Войти»
+Mobile -> Mobile : Создаёт code_verifier,\ncode_challenge S256, state и nonce
+Mobile -> Browser : Открывает /authorize
+Browser -> IdP : response_type=code + challenge
+IdP --> Browser : Страница аутентификации; MFA по риску
+Browser -> Patient : Запрашивает подтверждение входа
+Patient -> Browser : Вводит данные и подтверждает
+Browser -> IdP : Отправляет защищённую форму
+IdP --> Mobile : Claimed HTTPS App Link:\nauthorization code + state
+Mobile -> Mobile : Проверяет state
+Mobile -> IdP : POST /token\ncode + code_verifier (TLS)
+IdP --> Mobile : ID token + access token 10 мин\n+ rotating refresh token
+Mobile -> Mobile : Access token - в памяти;\nrefresh token - Keychain/Keystore
+
+Mobile -> Gateway : API-запрос\nAuthorization: Bearer access_token
+Gateway -> Gateway : Локально проверяет подпись по JWKS,\niss, aud, exp, nbf и scopes
+Gateway -> Api : Запрос + доверенные sub/scopes/traceId
+Api -> Api : Сопоставляет sub с patientId\nи проверяет доступ к объекту
+Api --> Gateway : Ответ без лишних PII
+Gateway --> Mobile : HTTPS response
+
+opt Обновление токена
+    Mobile -> IdP : POST /token с refresh token (TLS)
+    IdP --> Mobile : Новый access token\n+ новый refresh token; старый отозван
+end
+
+note over Mobile, IdP
+В приложении нет client_secret.
+Токены не проходят через URL и не логируются.
+PKCE связывает authorization code с данным приложением.
+end note
+
+note over Gateway, Api
+patientId от клиента не является основанием доступа.
+Идентичность пациента выводится из проверенного sub.
+end note
+
+@enduml

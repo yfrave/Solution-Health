@@ -1,0 +1,67 @@
+@startuml lab-results-flow
+
+!pragma layout smetana
+top to bottom direction
+
+skinparam shadowing false
+skinparam componentStyle rectangle
+skinparam defaultTextAlignment center
+
+actor "Лаборант" as Technician
+rectangle "LIS\nисточник истины" as LIS
+component "Result Ingestion Service\nидемпотентный REST API" as Ingestion
+database "Integration DB\nresult_registry + outbox" as IntegrationDb
+component "Outbox Publisher" as Publisher
+queue "Kafka\nlab-result.published.v1\nlab-result.available.v1" as Kafka
+component "Results Service\nconsumer + inbox" as Results
+database "Results DB\nread-model + inbox + outbox" as ResultsDb
+component "Patient API" as PatientApi
+rectangle "Мобильное приложение" as Mobile
+component "Notification Service" as Notifications
+component "Reconciliation Job" as Reconciliation
+queue "Retry topics / DLQ" as RetryDlq
+
+Technician --> LIS : 1. Подтверждает готовность\nрезультата
+LIS --> Ingestion : 2. POST result\neventId + analysisId + version\nHTTPS / REST JSON
+Ingestion --> IntegrationDb : 3. Одна транзакция:\nсохранить result_registry\nи outbox
+IntegrationDb --> Publisher : 4. Claim необработанного\noutbox
+Publisher --> Kafka : 5. Publish LabResultPublished.v1\nacks=all, idempotent producer
+Kafka --> Results : 6. Доставка at-least-once\nconsumer group
+Results --> ResultsDb : 7. Одна транзакция:\ninbox dedup + upsert read-model
+Results --> Kafka : 8. Outbox -> LabResultAvailable.v1
+Kafka --> Notifications : 9. Событие о доступности
+Notifications --> Mobile : 10. Push без медицинских данных
+Mobile --> PatientApi : 11. GET /api/v1/analysis-results\nJWT / HTTPS
+PatientApi --> Results : 12. GET internal/results\npatientId
+Results --> ResultsDb : 13. Чтение read-модели\nпо patientId
+ResultsDb --> Results : 14. Результаты
+Results --> PatientApi : 15. Результаты
+PatientApi --> Mobile : 16. 200 OK
+
+LIS -[#red,dashed]-> Ingestion : Нет подтверждения -> retry\nс тем же eventId
+Results -[#red,dashed]-> RetryDlq : Ошибка обработки ->\nограниченный retry / DLQ
+RetryDlq -[#red,dashed]-> Results : Повторная обработка
+Reconciliation --> LIS : Получает перечень READY\nза контрольный интервал
+Reconciliation --> IntegrationDb : Ищет отсутствующие\nanalysisId + version
+Reconciliation -[#orange,dashed]-> Ingestion : Повторно передаёт пропуски
+
+note bottom of IntegrationDb
+Ответ LIS возвращается только после commit.
+Сбой Kafka не приводит к потере результата:
+запись остаётся в outbox до публикации.
+end note
+
+note bottom of ResultsDb
+UNIQUE(event_id)
+UNIQUE(analysis_id, version)
+
+Повторное событие не создаёт дубликат.
+end note
+
+note bottom of Kafka
+Kafka хранит события и позволяет replay.
+Остановка CRM, Results Service или Notifications
+не блокирует первичную фиксацию результата.
+end note
+
+@enduml
